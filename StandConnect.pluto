@@ -88,6 +88,13 @@ local RSA_PUBLIC_KEY, RSA_PRIVATE_KEY = crypto.generatekeypair("rsa", RSA_BITS)
 --########################################--
 
 local connection_count = 0
+local connection_data = {
+--[[
+	{
+		force_close = false;
+	}
+]]
+}
 local connections_allowed = true
 
 --########################################--
@@ -108,7 +115,7 @@ end
 
 
 -- Function to run lua code at runtime
-local function load(lua: string)
+local function load(lua: string, menu_list = menu.my_root())
 	local store_dir = filesystem.store_dir()
 	local scripts_dir = store_dir .. "\\StandConnect\\"
 	
@@ -116,14 +123,26 @@ local function load(lua: string)
 		filesystem.mkdir(scripts_dir)
 	end
 	
-	local filepath = $"{scripts_dir}StandConnect-{crypto.sha1(lua)}.pluto"
+	local filepath = $"{scripts_dir}{crypto.sha1(lua)}.dat"
 	if not filesystem.exists(filepath) then
 		file = io.open(filepath, "w")
 		file:write(lua)
 		file:close()
 	end
 	
-	return dofile(filepath)
+	-- Make fake root
+	local old_get_root = menu.my_root
+	_ENV.menu.my_root = function()
+		return menu_list
+	end
+	
+	-- Execute script
+	local response = dofile(filepath)
+	
+	-- Cleanup and return
+	_ENV.menu.my_root = old_get_root
+	
+	return response
 end
 
 
@@ -135,13 +154,13 @@ end
 local UI_ROOT = menu.my_root()
 
 -- Toggle to globally disable connections
-local TOGGLE_DISABLE_CONNECTIONS = UI_ROOT:toggle("Disable Connections", {}, "", function(toggle)
+local TOGGLE_DISABLE_CONNECTIONS = UI_ROOT:toggle("Disable New Connections", {}, "", function(toggle)
 	connections_allowed = toggle
 end)
 
 
 --########################################--
---SECURITY PROMPT
+--SECURITY
 --########################################--
 
 
@@ -235,7 +254,7 @@ end
 
 -- Function to handle the authorization of connections
 local SERVER_CONFIG_MESSAGE = $"{RSA_BITS}:{RSA_PUBLIC_KEY.e:tostring()}:{RSA_PUBLIC_KEY.n:tostring()}"
-local function handle_auth(id: number, connection: userdata) <nodiscard>
+local function handle_auth(id: number, connection: userdata, connection_root) <nodiscard>
 	-- Send our config
 	connection:send(SERVER_CONFIG_MESSAGE)
 	
@@ -247,6 +266,7 @@ local function handle_auth(id: number, connection: userdata) <nodiscard>
 	
 	-- Parse client pub key
 	local [CLIENT_EXPONENT, CLIENT_MODULUS] = data:split(":")
+	
 	if CLIENT_EXPONENT == nil or CLIENT_MODULUS == nil then
 		return AUTH_STATUS.BAD_REQUEST
 	end
@@ -262,9 +282,10 @@ local function handle_auth(id: number, connection: userdata) <nodiscard>
 	
 	-- Generate secret code
 	local SECRET_CODE = crypto.random(1000000, 9999999)
+	local code_display = connection_root:divider($"Code: {SECRET_CODE}")
 	
 	-- Check for continue
-	local should_continue = create_confirmation_prompt($"Your code is: {SECRET_CODE}, do you want to connect?")
+	local should_continue = create_confirmation_prompt($"Do you want to allow a connection?", redirect=code_display)
 	if not should_continue then
 		return AUTH_STATUS.REQUEST_DENIED
 	end
@@ -285,6 +306,7 @@ local function handle_auth(id: number, connection: userdata) <nodiscard>
 	end
 	
 	ALERT($"Connection {id} was authorized")
+	code_display:delete()
 	
 	-- Generate encryption key
 	local enc_key = range(32):map(|| -> string.char(crypto.random(0, 255))):concat("")
@@ -312,9 +334,9 @@ end
 
 
 -- Function to handle connections
-local function handle_connection(id: number, connection: userdata): void
+local function handle_connection(id: number, connection: userdata, connection_root): void
 	-- authorization checks
-	local authorized, encrypt, decrypt = handle_auth(id, connection)
+	local authorized, encrypt, decrypt = handle_auth(id, connection, connection_root)
 	if authorized ~= AUTH_STATUS.OK then
 		ALERT("Authorization failed with error code: "..authorized)
 		return
@@ -339,7 +361,7 @@ local function handle_connection(id: number, connection: userdata): void
 		-- Execute the code
 		local response = nil
 		try
-			response = load(code)
+			response = load(code, connection_root)
 		catch err then
 			LOG($"Connection {id}: {err}")
 			continue
@@ -377,11 +399,20 @@ local function connection_thread(): void
 		connection_count += 1
 		ALERT("Connection "..connection_count.." connected")
 		
+		-- make connection ui
+		local connection_root = UI_ROOT:list($"Connection {connection_count}")
+		connection_root:action("Force Close Connection", {}, "Forces the connection to close", function()
+			connection:close()
+		end)
+		
 		-- connected
-		handle_connection(connection_count, connection)
+		handle_connection(connection_count, connection, connection_root)
 		
 		-- disconnected
 		ALERT("Connection "..connection_count.." disconnected")
+		
+		-- cleanup connection
+		connection_root:delete()
 		connection:close()
 		connection_count -= 1
 	end
