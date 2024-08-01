@@ -19,20 +19,13 @@
 -- OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 -- SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 --
-assert = function(condition, message) -- kill script on assert
-	if condition then return end
-	util.log("Error: "..message)
-	util.stop_script()
-end
-
 local { socket, bigint, crypto, json, base64 } = require "pluto:*"
 
 -- Connect to server
 local port = 42658
-util.toast("Connecting to port "..port)
+print("Connecting to port "..port)
 local c = socket.connect("127.0.0.1", port)
 assert(c, "failed to bind tcp")
-util.keep_running()
 
 -- Load server config
 local data = c:recv()
@@ -51,38 +44,24 @@ local SERVER_PUB_KEY = {
 -- Generate our key pair
 local RSA_PUBLIC_KEY, RSA_PRIVATE_KEY = crypto.generatekeypair("rsa", RSA_BITS)
 
--- State
-local can_continue = false
-local secret_code = ""
-
--- Code prompt
-local code_prompt = menu.my_root():action("code", {"standconnectcode"}, "", function()
-	menu.show_command_box("standconnectcode ")
-end, function(code)
-	secret_code = code
-	can_continue = true
-end)
-
 -- Send the server our config
 c:send($"{RSA_PUBLIC_KEY.e:tostring()}:{RSA_PUBLIC_KEY.n:tostring()}")
+
+print("Please allow us to connect.")
 
 -- Check if we are allowed to continue
 local allowed = c:recv()
 assert(allowed, "Connection request was denied")
 
-menu.show_command_box("standconnectcode ")
-
--- Get code input
-while not can_continue do
-	util.yield(100)
-end
-code_prompt:delete()
+-- Code prompt
+io.write("Enter code: ")
+local secret_code = io.read("*l"):strip()
 
 -- Send the encrypted code
 c:send(crypto.encrypt(secret_code, "rsa-pkcs1", SERVER_PUB_KEY))
 
 -- Get the encryption key
-local data = c:recv()
+data = c:recv()
 assert(data, "server closed connection")
 
 local decrypted_key = crypto.decrypt(data, "rsa-pkcs1", RSA_PRIVATE_KEY)
@@ -99,7 +78,13 @@ end
 
 local function server_exec(lua)
 	c:send(encrypt(lua))
-	local res = decrypt(c:recv())
+	local response = c:recv()
+	if not response then
+		warn("Connection closed!")
+		os.exit()
+	end
+	
+	local res = decrypt(response)
 	local decoded = json.decode(res)
 	if not decoded or #decoded < 1 then
 		return
@@ -108,11 +93,21 @@ local function server_exec(lua)
 	return decoded[1]
 end
 
--- Make an execution prompt
-menu.my_root():action("execution", {"standconnectexec"}, "", function()
-	menu.show_command_box("standconnectexec ")
-end, function(lua)
-	local result = server_exec(lua)
+-- Make a repl
+print("#### REPL - Type 'exit' to exit ####")
 
-	util.log($"StandConnect Client Output: {tostring(result)}")
-end):focus()
+while true do
+	try
+		io.write("> ")
+		local lua = io.read("*l"):strip()
+		if lua == "exit" then
+			break
+		end
+		
+		local result = server_exec(lua)
+
+		print(tostring(result))
+	catch e then
+		warn("Error: "..e)
+	end
+end
