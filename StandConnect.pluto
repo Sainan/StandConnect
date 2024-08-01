@@ -155,7 +155,7 @@ local UI_ROOT = menu.my_root()
 
 -- Toggle to globally disable connections
 local TOGGLE_DISABLE_CONNECTIONS = UI_ROOT:toggle("Disable New Connections", {}, "", function(toggle)
-	connections_allowed = toggle
+	connections_allowed = not toggle
 end)
 
 
@@ -382,11 +382,6 @@ end
 -- Function thread to handle the processing of new connections
 local function connection_thread(): void
 	while true do
-		if not connections_allowed then
-			util.yield(100)
-			continue
-		end
-	
 		while not listener:hasconnection() do
 			util.yield(10)
 		end
@@ -396,6 +391,13 @@ local function connection_thread(): void
 		if not connection then
 			continue
 		end
+		
+		-- check if connections allowed
+		if not connections_allowed then
+			connection:close()
+			continue
+		end
+		
 		connection_count += 1
 		ALERT("Connection "..connection_count.." connected")
 		
