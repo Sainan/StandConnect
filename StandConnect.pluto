@@ -34,9 +34,6 @@
 $define MAX_CONNECTIONS = 5
 $define PORT = 42658
 --
--- [SECURITY CONFIG] --
-$define RSA_BITS = 1024
---
 --###########################################################################
 --------- CODE - DO NOT TOUCH IF YOU DO NOT KNOW WHAT YOU ARE DOING ---------
 --###########################################################################
@@ -45,18 +42,10 @@ $define RSA_BITS = 1024
 ##### PROTOCOL DESIGN #####
 
 -- CONNECTION OPEN --
-	SERVER: <RSA_BITS>:<RSA PUBLIC EXPONENT>:<RSA PUBLIC MODULUS>
-	CLIENT: <RSA PUBLIC EXPONENT>:<RSA PUBLIC MODULUS>
-	
 #A secret code is displayed to the user
 	SERVER: READY
-	CLIENT: <secret code is encrypted with server's public key>
+	CLIENT: <secret code>
 #The code is verified
-
-#The server generates an encryption key to be used
-	SERVER: <new aes-cbc-pkcs7 encryption key (iv:key), encrypted with client's public key>
-	
-#The all messages from now will be encrypted with that key, server will respond with JSON
 
 	CLIENT: util.toast("Success!")
 	SERVER: null
@@ -74,14 +63,11 @@ $define RSA_BITS = 1024
 
 pluto_use "0.9.4"
 
-local { socket, bigint, crypto, json, base64 } = require "pluto:*"
+local { socket, crypto, json, base64 } = require "pluto:*"
 local listener
 
---########################################--
---INITIALIZE CONSTANTS
---########################################--
-
-local RSA_PUBLIC_KEY, RSA_PRIVATE_KEY = crypto.generatekeypair("rsa", RSA_BITS)
+-- Script dependency
+util.require_natives("3095a", "g")
 
 --########################################--
 --SHARED CONNECTION DATA
@@ -253,33 +239,7 @@ end
 
 
 -- Function to handle the authorization of connections
-local SERVER_CONFIG_MESSAGE = $"{RSA_BITS}:{RSA_PUBLIC_KEY.e:tostring()}:{RSA_PUBLIC_KEY.n:tostring()}"
 local function handle_auth(id: number, connection: userdata, connection_root) <nodiscard>
-	-- Send our config
-	connection:send(SERVER_CONFIG_MESSAGE)
-	
-	-- Recieve client's key
-	local data = connection:recv()
-	if not data then
-		return AUTH_STATUS.CLIENT_CLOSE
-	end
-	
-	-- Parse client pub key
-	local [CLIENT_EXPONENT, CLIENT_MODULUS] = data:split(":")
-	
-	if CLIENT_EXPONENT == nil or CLIENT_MODULUS == nil then
-		return AUTH_STATUS.BAD_REQUEST
-	end
-
-	local CLIENT_PUB_KEY = {
-		n = new bigint(CLIENT_MODULUS),
-		e = new bigint(CLIENT_EXPONENT),
-	}
-	
-	if CLIENT_PUB_KEY.n:bitlength() ~= RSA_BITS then
-		return AUTH_STATUS.BAD_REQUEST
-	end
-	
 	-- Generate secret code
 	local SECRET_CODE = crypto.random(1000000, 9999999)
 	local code_display = connection_root:divider($"Code: {SECRET_CODE}")
@@ -299,32 +259,15 @@ local function handle_auth(id: number, connection: userdata, connection_root) <n
 		return AUTH_STATUS.CLIENT_CLOSE
 	end
 	
-	-- Decrypt and check key
-	local decrypted_key = crypto.decrypt(key_confirmation, "rsa-pkcs1", RSA_PRIVATE_KEY)
-	if decrypted_key ~= tostring(SECRET_CODE) then
+	-- Check key
+	if key_confirmation ~= tostring(SECRET_CODE) then
 		return AUTH_STATUS.INVALID_KEY
 	end
 	
 	ALERT($"Connection {id} was authorized")
 	code_display:delete()
 	
-	-- Generate encryption key
-	local enc_key = range(32):map(|| -> string.char(crypto.random(0, 255))):concat("")
-	local enc_iv = range(16):map(|| -> string.char(crypto.random(0, 255))):concat("")
-	
-	local encrypted_key = crypto.encrypt($"{enc_iv}:{enc_key}", "rsa-pkcs1", CLIENT_PUB_KEY)
-	connection:send(encrypted_key)
-	
-	-- Make helper functions for encrypt and decrypt
-	local function encrypt(plaintext)
-		return base64.encode(crypto.encrypt(plaintext, "aes-cbc-pkcs7", enc_key, enc_iv))
-	end
-
-	local function decrypt(encrypted)
-		return crypto.decrypt(base64.decode(encrypted), "aes-cbc-pkcs7", enc_key, enc_iv)
-	end
-	
-	return AUTH_STATUS.OK, encrypt, decrypt
+	return AUTH_STATUS.OK
 end
 
 
@@ -336,7 +279,7 @@ end
 -- Function to handle connections
 local function handle_connection(id: number, connection: userdata, connection_root): void
 	-- authorization checks
-	local authorized, encrypt, decrypt = handle_auth(id, connection, connection_root)
+	local authorized = handle_auth(id, connection, connection_root)
 	if authorized ~= AUTH_STATUS.OK then
 		ALERT("Authorization failed with error code: "..authorized)
 		return
@@ -349,27 +292,20 @@ local function handle_connection(id: number, connection: userdata, connection_ro
 			return
 		end
 		
-		-- Decrypt user data
-		local code = decrypt(data)
-		if not code then
-			LOG($"Connection {id} sent invalid data")
-			continue
-		end
-		
 		LOG($"Connection {id} sent execution request")
 		
 		-- Execute the code
 		local response = nil
 		try
-			response = load(code, connection_root)
+			response = load(data, connection_root)
 		catch err then
-			LOG($"Connection {id}: {err}")
+			ALERT($"Connection {id}: {err}")
 			continue
 		end
 		
 		-- it works..
 		local encoded = json.encode({response})
-		connection:send(encrypt(encoded))
+		connection:send(encoded)
 	end
 end
 
